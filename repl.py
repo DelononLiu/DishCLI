@@ -46,8 +46,9 @@ def main():
             break
         elif cmd == "/help":
             print(
-                "  <command>                           execute command via SSH\n"
-                "  /connect [host] [user] [password]  connect\n"
+                "  <command>                           execute command (SSH or telnet)\n"
+                "  /connect [host] [user] [pass]      SSH connect\n"
+                "  /telnet <host> [port]               Telnet connect\n"
                 "  /close                             close connection\n"
                 "  /raw <json>                        send raw JSON\n"
                 "  /help /exit"
@@ -57,6 +58,15 @@ def main():
             user = parts[2] if len(parts) > 2 else "long2015"
             password = parts[3] if len(parts) > 3 else ""
             send({"action": "connect", "params": {"host": host, "user": user, "password": password}})
+        elif cmd == "/telnet":
+            host = parts[1] if len(parts) > 1 else "127.0.0.1"
+            port = 23
+            if len(parts) > 2:
+                try:
+                    port = int(parts[2])
+                except ValueError:
+                    pass
+            send({"action": "connect", "params": {"host": host, "port": port, "type": "telnet"}})
         elif cmd == "/exec":
             cmdline = line[len("/exec "):] if line.startswith("/exec ") else ""
             if not cmdline:
