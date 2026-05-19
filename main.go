@@ -38,6 +38,7 @@ const (
 	connSSH connType = iota
 	connTelnet
 	connADB
+	connLocal
 )
 
 type Client struct {
@@ -131,9 +132,21 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		typ = connTelnet
 	case "adb":
 		typ = connADB
+	case "local":
+		typ = connLocal
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
+
+	if typ == connLocal {
+		mu.Lock()
+		closeClientLocked()
+		client = &Client{typ: connLocal}
+		mu.Unlock()
+
+		writeResult(writer, req.ReqId, true)
+		return
+	}
 
 	if typ == connTelnet {
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
@@ -255,6 +268,12 @@ func handleExec(writer *bufio.Writer, req Request) {
 		adbAddr := client.adbAddr
 		mu.Unlock()
 		handleADBExec(writer, req, adbAddr)
+		return
+	}
+
+	if client.typ == connLocal {
+		mu.Unlock()
+		handleLocalExec(writer, req)
 		return
 	}
 
@@ -381,6 +400,59 @@ func handleADBExec(writer *bufio.Writer, req Request, adbAddr string) {
 
 	if err := c.Start(); err != nil {
 		writeError(writer, req.ReqId, "adb exec failed: "+err.Error())
+		return
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 255
+			}
+		}
+
+		scanner := bufio.NewScanner(&stdout)
+		for scanner.Scan() {
+			writeStdout(writer, req.ReqId, scanner.Text())
+		}
+
+		scanner = bufio.NewScanner(&stderr)
+		for scanner.Scan() {
+			writeStderr(writer, req.ReqId, scanner.Text())
+		}
+
+		writeExit(writer, req.ReqId, exitCode)
+	case <-ctx.Done():
+		c.Process.Kill()
+		writeError(writer, req.ReqId, "command timeout")
+	}
+}
+
+func handleLocalExec(writer *bufio.Writer, req Request) {
+	cmd, _ := req.Params["cmd"].(string)
+	if cmd == "" {
+		writeError(writer, req.ReqId, "empty command")
+		return
+	}
+
+	c := exec.Command("sh", "-c", cmd)
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	if err := c.Start(); err != nil {
+		writeError(writer, req.ReqId, "exec failed: "+err.Error())
 		return
 	}
 

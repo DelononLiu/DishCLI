@@ -46,11 +46,12 @@ def main():
             break
         elif cmd == "/help":
             print(
-                "  <command>                           execute command (SSH/telnet/adb)\n"
+                "  <command>                           execute command (SSH/telnet/adb/local)\n"
                 "  /connect [host] [user] [pass]      SSH connect\n"
                 "  /telnet <host> [port]               Telnet connect\n"
                 "  /adb [host] [port]                  ADB connect (network, default port 5555)\n"
                 "  /adb-local                          ADB connect (local USB)\n"
+                "  /local                              Local mode (run commands on this machine)\n"
                 "  /close                             close connection\n"
                 "  /raw <json>                        send raw JSON\n"
                 "  /help /exit"
@@ -80,6 +81,8 @@ def main():
             send({"action": "connect", "params": {"host": host, "port": port, "type": "adb"}})
         elif cmd == "/adb-local":
             send({"action": "connect", "params": {"type": "adb"}})
+        elif cmd == "/local":
+            send({"action": "connect", "params": {"type": "local"}})
         elif cmd == "/exec":
             cmdline = line[len("/exec "):] if line.startswith("/exec ") else ""
             if not cmdline:
