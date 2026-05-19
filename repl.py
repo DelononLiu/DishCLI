@@ -46,8 +46,8 @@ def main():
             break
         elif cmd == "/help":
             print(
+                "  <command>                           execute command via SSH\n"
                 "  /connect [host] [user] [password]  connect\n"
-                "  /exec <cmd>                        execute command\n"
                 "  /close                             close connection\n"
                 "  /raw <json>                        send raw JSON\n"
                 "  /help /exit"
@@ -58,10 +58,11 @@ def main():
             password = parts[3] if len(parts) > 3 else ""
             send({"action": "connect", "params": {"host": host, "user": user, "password": password}})
         elif cmd == "/exec":
-            if len(parts) < 2:
+            cmdline = line[len("/exec "):] if line.startswith("/exec ") else ""
+            if not cmdline:
                 print("usage: /exec <command>")
                 continue
-            send({"action": "exec", "params": {"cmd": parts[1]}})
+            send({"action": "exec", "params": {"cmd": cmdline}})
         elif cmd == "/close":
             send({"action": "close"})
         elif cmd == "/raw":
@@ -70,7 +71,7 @@ def main():
             proc.stdin.write(raw + "\n")
             proc.stdin.flush()
         else:
-            print(f"unknown: {cmd}  (/help)")
+            send({"action": "exec", "params": {"cmd": line}})
 
     proc.stdin.close()
     proc.wait()
