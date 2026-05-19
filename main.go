@@ -2,11 +2,13 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"os/signal"
 	"sync"
 	"syscall"
@@ -35,6 +37,7 @@ type connType int
 const (
 	connSSH connType = iota
 	connTelnet
+	connADB
 )
 
 type Client struct {
@@ -44,6 +47,8 @@ type Client struct {
 	sshSession *ssh.Session
 
 	telnetConn net.Conn
+
+	adbAddr string // "host:port" for network ADB, "" for local USB
 }
 
 var (
@@ -121,8 +126,11 @@ func handleConnect(writer *bufio.Writer, req Request) {
 	}
 
 	typ := connSSH
-	if t, _ := params["type"].(string); t == "telnet" {
+	switch t, _ := params["type"].(string); t {
+	case "telnet":
 		typ = connTelnet
+	case "adb":
+		typ = connADB
 	}
 
 	addr := fmt.Sprintf("%s:%d", host, port)
@@ -137,6 +145,39 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		mu.Lock()
 		closeClientLocked()
 		client = &Client{typ: connTelnet, telnetConn: conn}
+		mu.Unlock()
+
+		writeResult(writer, req.ReqId, true)
+		return
+	}
+
+	if typ == connADB {
+		if host != "" {
+			out, err := exec.Command("adb", "connect", addr).CombinedOutput()
+			if err != nil {
+				writeError(writer, req.ReqId, "adb connect failed: "+string(out))
+				return
+			}
+		} else {
+			out, err := exec.Command("adb", "devices").Output()
+			if err != nil {
+				writeError(writer, req.ReqId, "adb devices failed: "+err.Error())
+				return
+			}
+			if !hasDevice(out) {
+				writeError(writer, req.ReqId, "no adb device found")
+				return
+			}
+		}
+
+		adbAddr := addr
+		if host == "" {
+			adbAddr = ""
+		}
+
+		mu.Lock()
+		closeClientLocked()
+		client = &Client{typ: connADB, adbAddr: adbAddr}
 		mu.Unlock()
 
 		writeResult(writer, req.ReqId, true)
@@ -181,6 +222,20 @@ func handleConnect(writer *bufio.Writer, req Request) {
 	writeResult(writer, req.ReqId, true)
 }
 
+func hasDevice(out []byte) bool {
+	lines := bytes.Split(out, []byte("\n"))
+	for _, line := range lines {
+		trim := bytes.TrimSpace(line)
+		if len(trim) == 0 {
+			continue
+		}
+		if bytes.Contains(trim, []byte("\tdevice")) {
+			return true
+		}
+	}
+	return false
+}
+
 func handleExec(writer *bufio.Writer, req Request) {
 	mu.Lock()
 	if client == nil {
@@ -192,8 +247,14 @@ func handleExec(writer *bufio.Writer, req Request) {
 	if client.typ == connTelnet {
 		conn := client.telnetConn
 		mu.Unlock()
-
 		handleTelnetExec(writer, req, conn)
+		return
+	}
+
+	if client.typ == connADB {
+		adbAddr := client.adbAddr
+		mu.Unlock()
+		handleADBExec(writer, req, adbAddr)
 		return
 	}
 
@@ -295,6 +356,64 @@ func handleExec(writer *bufio.Writer, req Request) {
 			writeError(writer, req.ReqId, "command timeout")
 			return
 		}
+	}
+}
+
+func handleADBExec(writer *bufio.Writer, req Request, adbAddr string) {
+	cmd, _ := req.Params["cmd"].(string)
+	if cmd == "" {
+		writeError(writer, req.ReqId, "empty command")
+		return
+	}
+
+	args := []string{"shell", cmd}
+	if adbAddr != "" {
+		args = append([]string{"-s", adbAddr}, args...)
+	}
+
+	c := exec.Command("adb", args...)
+	var stdout, stderr bytes.Buffer
+	c.Stdout = &stdout
+	c.Stderr = &stderr
+
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	if err := c.Start(); err != nil {
+		writeError(writer, req.ReqId, "adb exec failed: "+err.Error())
+		return
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		exitCode := 0
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			} else {
+				exitCode = 255
+			}
+		}
+
+		scanner := bufio.NewScanner(&stdout)
+		for scanner.Scan() {
+			writeStdout(writer, req.ReqId, scanner.Text())
+		}
+
+		scanner = bufio.NewScanner(&stderr)
+		for scanner.Scan() {
+			writeStderr(writer, req.ReqId, scanner.Text())
+		}
+
+		writeExit(writer, req.ReqId, exitCode)
+	case <-ctx.Done():
+		c.Process.Kill()
+		writeError(writer, req.ReqId, "command timeout")
 	}
 }
 
@@ -433,8 +552,6 @@ func handleTelnetNegotiation(conn net.Conn, data []byte) []byte {
 	return result
 }
 
-
-
 func handleClose(writer *bufio.Writer, req Request) {
 	mu.Lock()
 	closeClientLocked()
@@ -458,6 +575,9 @@ func closeClientLocked() {
 	if client.telnetConn != nil {
 		client.telnetConn.Close()
 		client.telnetConn = nil
+	}
+	if client.typ == connADB && client.adbAddr != "" {
+		exec.Command("adb", "disconnect", client.adbAddr).Run()
 	}
 	client = nil
 }
