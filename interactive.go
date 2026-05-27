@@ -401,13 +401,12 @@ type ShellSession struct {
 func newShellSession(shell string, cwd string) *ShellSession {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	args := []string{"--norc", "--noprofile"}
-	if cwd != "" {
-		args = append(args, "--cd", cwd)
-	}
-	args = append(args, "-i")
+	args := []string{"--norc", "--noprofile", "-i"}
 
 	cmd := exec.CommandContext(ctx, shell, args...)
+	if cwd != "" {
+		cmd.Dir = cwd
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
