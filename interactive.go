@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -377,4 +379,171 @@ func cleanupInteractiveSession() {
 	sessionMu.Lock()
 	cleanupSessionLocked()
 	sessionMu.Unlock()
+}
+
+// ─── Shell Session (general interactive shell with push-based stdout) ───
+
+var (
+	activeShell *ShellSession
+	shellSessMu sync.Mutex
+)
+
+type ShellSession struct {
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	cancel  context.CancelFunc
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	started bool
+}
+
+func newShellSession(shell string, cwd string) *ShellSession {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	args := []string{"--norc", "--noprofile"}
+	if cwd != "" {
+		args = append(args, "--cd", cwd)
+	}
+	args = append(args, "-i")
+
+	cmd := exec.CommandContext(ctx, shell, args...)
+
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		cancel()
+		return nil
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		cancel()
+		return nil
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		cancel()
+		return nil
+	}
+
+	if err := cmd.Start(); err != nil {
+		cancel()
+		return nil
+	}
+
+	sess := &ShellSession{
+		cmd:     cmd,
+		stdin:   stdin,
+		cancel:  cancel,
+		started: true,
+	}
+
+	// Background reader for stdout — pushes events to os.Stdout directly
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				sess.mu.Lock()
+				sess.buf.Write(buf[:n])
+				sess.mu.Unlock()
+				// Push to KCode immediately
+				writeShellOutput(chunk)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Background reader for stderr (merged into same buffer and push)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				chunk := string(buf[:n])
+				sess.mu.Lock()
+				sess.buf.Write(buf[:n])
+				sess.mu.Unlock()
+				writeShellStderr(chunk)
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	return sess
+}
+
+func (s *ShellSession) write(data string) error {
+	if !s.started {
+		return fmt.Errorf("shell not started")
+	}
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		data += "\n"
+	}
+	_, err := fmt.Fprint(s.stdin, data)
+	return err
+}
+
+func (s *ShellSession) readOutput() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.buf.Len() == 0 {
+		return ""
+	}
+	data := s.buf.String()
+	s.buf.Reset()
+	return data
+}
+
+func (s *ShellSession) close() {
+	s.cancel()
+	if s.cmd != nil && s.cmd.Process != nil {
+		s.cmd.Process.Kill()
+	}
+}
+
+func killShellLocked() {
+	if activeShell != nil {
+		activeShell.close()
+		activeShell = nil
+	}
+}
+
+// ─── Shell output push helpers (called from background goroutines) ───
+
+func writeShellOutput(data string) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	resp, _ := json.Marshal(Response{
+		ReqId: "_shell_output",
+		Type:  "stdout",
+		Data:  data,
+	})
+	os.Stdout.Write(resp)
+	os.Stdout.Write([]byte{'\n'})
+}
+
+func writeShellStderr(data string) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	resp, _ := json.Marshal(Response{
+		ReqId: "_shell_output",
+		Type:  "stderr",
+		Data:  data,
+	})
+	os.Stdout.Write(resp)
+	os.Stdout.Write([]byte{'\n'})
 }

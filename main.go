@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -40,6 +41,7 @@ type Executor interface {
 
 var (
 	defaultTimeout = 30 * time.Second
+	stdoutMu      sync.Mutex
 )
 
 func main() {
@@ -54,38 +56,49 @@ func main() {
 
 	signal.Ignore(syscall.SIGINT, syscall.SIGTERM)
 
-	scanner := bufio.NewScanner(os.Stdin)
-	writer := bufio.NewWriter(os.Stdout)
-	defer writer.Flush()
-
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
+	reqCh := make(chan Request, 100)
+	go func() {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			line := scanner.Text()
+			if line == "" {
+				continue
+			}
+			var req Request
+			if err := json.Unmarshal([]byte(line), &req); err != nil {
+				resp := Response{ReqId: req.ReqId, Type: "error", Msg: "invalid json"}
+				writeResp(resp)
+				continue
+			}
+			reqCh <- req
 		}
+	}()
 
-		var req Request
-		if err := json.Unmarshal([]byte(line), &req); err != nil {
-			writeError(writer, req.ReqId, "invalid json")
-			continue
-		}
-
+	for req := range reqCh {
 		switch req.Action {
 		case "connect":
-			handleConnect(writer, req)
+			handleConnect(req)
 		case "close":
-			handleClose(writer, req)
+			handleClose(req)
+		case "shellStart":
+			handleShellStart(req)
+		case "shellWrite":
+			handleShellWrite(req)
+		case "shellRead":
+			handleShellRead(req)
+		case "shellStop":
+			handleShellStop(req)
 		default:
-			handleExecAction(writer, req)
+			handleExecAction(req)
 		}
 	}
 }
 
-func handleExecAction(writer *bufio.Writer, req Request) {
+func handleExecAction(req Request) {
 	mu.Lock()
 	if client == nil {
 		mu.Unlock()
-		writeError(writer, req.ReqId, "not connected")
+		writeError(req.ReqId, "not connected")
 		return
 	}
 	c := client
@@ -98,7 +111,7 @@ func handleExecAction(writer *bufio.Writer, req Request) {
 	case "gdbStart", "gdbCmd", "gdbExit":
 		exec = &InteractiveExecutor{clientTyp: c.typ}
 	default:
-		writeError(writer, req.ReqId, "unknown action")
+		writeError(req.ReqId, "unknown action")
 		return
 	}
 
@@ -115,8 +128,83 @@ func handleExecAction(writer *bufio.Writer, req Request) {
 			Code:  ol.Code,
 			Msg:   ol.Msg,
 		}
-		writeJSON(writer, resp)
+		writeResp(resp)
 	}
+}
+
+func handleShellStart(req Request) {
+	shellSessMu.Lock()
+	defer shellSessMu.Unlock()
+
+	if activeShell != nil {
+		killShellLocked()
+	}
+
+	params := req.Params
+	shell, _ := params["shell"].(string)
+	if shell == "" {
+		shell = "bash"
+	}
+
+	cwd, _ := params["cwd"].(string)
+	sess := newShellSession(shell, cwd)
+	if sess == nil {
+		writeResp(Response{ReqId: req.ReqId, Type: "error", Msg: "failed to start shell"})
+		return
+	}
+
+	activeShell = sess
+	writeResp(Response{ReqId: req.ReqId, Type: "result", Ok: true})
+}
+
+func handleShellWrite(req Request) {
+	shellSessMu.Lock()
+	sess := activeShell
+	shellSessMu.Unlock()
+
+	if sess == nil {
+		writeResp(Response{ReqId: req.ReqId, Type: "error", Msg: "no active shell"})
+		return
+	}
+
+	data, _ := req.Params["data"].(string)
+	if data == "" {
+		writeResp(Response{ReqId: req.ReqId, Type: "error", Msg: "empty data"})
+		return
+	}
+
+	if err := sess.write(data); err != nil {
+		writeResp(Response{ReqId: req.ReqId, Type: "error", Msg: err.Error()})
+		return
+	}
+
+	writeResp(Response{ReqId: req.ReqId, Type: "result", Ok: true})
+}
+
+func handleShellRead(req Request) {
+	shellSessMu.Lock()
+	sess := activeShell
+	shellSessMu.Unlock()
+
+	if sess == nil {
+		writeError(req.ReqId, "no active shell")
+		return
+	}
+
+	data := sess.readOutput()
+	if data != "" {
+		writeStdout(req.ReqId, data)
+	}
+	writeExit(req.ReqId, 0)
+}
+
+func handleShellStop(req Request) {
+	shellSessMu.Lock()
+	killShellLocked()
+	shellSessMu.Unlock()
+
+	writeResp(Response{ReqId: req.ReqId, Type: "result", Ok: true})
+	writeResp(Response{ReqId: req.ReqId, Type: "exit", Code: 0})
 }
 
 func printHelp() {
@@ -129,42 +217,56 @@ Options:
 In JSON RPC stdio mode, dishcli reads JSON requests from stdin and writes JSON responses to stdout.
 Each request should be a JSON object with the following fields:
   - reqId: string (request ID)
-  - action: string (one of: "connect", "exec", "gdbStart", "gdbCmd", "gdbExit", "close")
+  - action: string (one of: "connect", "exec", "gdbStart", "gdbCmd", "gdbExit",
+            "shellStart", "shellWrite", "shellRead", "shellStop", "close")
   - params: object (parameters specific to the action)
+
+Actions:
+  connect       Connect to a device (SSH/telnet/ADB/local)
+  exec          Run a one-shot command
+  gdbStart      Start interactive GDB session
+  gdbCmd        Send GDB command
+  gdbExit       Exit GDB session
+  shellStart    Start interactive shell (params: shell, cwd)
+  shellWrite    Write data to shell stdin (params: data)
+  shellRead     Read buffered shell output (returns stdout + exit)
+  shellStop     Stop interactive shell
+  close         Disconnect device
 
 Examples:
   echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dishcli --json
-  echo '{"reqId":"2","action":"exec","params":{"cmd":"echo hello"}}' | dishcli --json`)
+  echo '{"reqId":"2","action":"exec","params":{"cmd":"echo hello"}}' | dishcli --json
+  echo '{"reqId":"3","action":"shellStart","params":{"shell":"bash","cwd":"/tmp"}}' | dishcli --json`)
 }
 
-func writeResult(writer *bufio.Writer, reqId string, ok bool) {
-	resp := Response{ReqId: reqId, Type: "result", Ok: ok}
-	writeJSON(writer, resp)
-}
+// ─── Output helpers (mutex-protected, write directly to os.Stdout) ───
 
-func writeStdout(writer *bufio.Writer, reqId, data string) {
-	resp := Response{ReqId: reqId, Type: "stdout", Data: data}
-	writeJSON(writer, resp)
-}
-
-func writeStderr(writer *bufio.Writer, reqId, data string) {
-	resp := Response{ReqId: reqId, Type: "stderr", Data: data}
-	writeJSON(writer, resp)
-}
-
-func writeExit(writer *bufio.Writer, reqId string, code int) {
-	resp := Response{ReqId: reqId, Type: "exit", Code: code}
-	writeJSON(writer, resp)
-}
-
-func writeError(writer *bufio.Writer, reqId, msg string) {
-	resp := Response{ReqId: reqId, Type: "error", Msg: msg}
-	writeJSON(writer, resp)
-}
-
-func writeJSON(writer *bufio.Writer, resp Response) {
+func writeResp(resp Response) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	w := bufio.NewWriter(os.Stdout)
 	data, _ := json.Marshal(resp)
-	writer.Write(data)
-	writer.WriteByte('\n')
-	writer.Flush()
+	w.Write(data)
+	w.WriteByte('\n')
+	w.Flush()
+}
+
+func writeResult(reqId string, ok bool) {
+	writeResp(Response{ReqId: reqId, Type: "result", Ok: ok})
+}
+
+func writeStdout(reqId, data string) {
+	writeResp(Response{ReqId: reqId, Type: "stdout", Data: data})
+}
+
+func writeStderr(reqId, data string) {
+	writeResp(Response{ReqId: reqId, Type: "stderr", Data: data})
+}
+
+func writeExit(reqId string, code int) {
+	writeResp(Response{ReqId: reqId, Type: "exit", Code: code})
+}
+
+func writeError(reqId, msg string) {
+	writeResp(Response{ReqId: reqId, Type: "error", Msg: msg})
 }

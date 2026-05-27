@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
 	"net"
@@ -37,7 +36,7 @@ var (
 	mu     sync.Mutex
 )
 
-func handleConnect(writer *bufio.Writer, req Request) {
+func handleConnect(req Request) {
 	params := req.Params
 	host, _ := params["host"].(string)
 	port := 22
@@ -63,14 +62,14 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		client = &Client{typ: connLocal}
 		mu.Unlock()
 
-		writeResult(writer, req.ReqId, true)
+		writeResult(req.ReqId, true)
 		return
 	}
 
 	if typ == connTelnet {
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
-			writeError(writer, req.ReqId, "dial failed: "+err.Error())
+			writeError(req.ReqId, "dial failed: "+err.Error())
 			return
 		}
 
@@ -79,7 +78,7 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		client = &Client{typ: connTelnet, telnetConn: conn}
 		mu.Unlock()
 
-		writeResult(writer, req.ReqId, true)
+		writeResult(req.ReqId, true)
 		return
 	}
 
@@ -87,17 +86,17 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		if host != "" {
 			out, err := exec.Command("adb", "connect", addr).CombinedOutput()
 			if err != nil {
-				writeError(writer, req.ReqId, "adb connect failed: "+string(out))
+				writeError(req.ReqId, "adb connect failed: "+string(out))
 				return
 			}
 		} else {
 			out, err := exec.Command("adb", "devices").Output()
 			if err != nil {
-				writeError(writer, req.ReqId, "adb devices failed: "+err.Error())
+				writeError(req.ReqId, "adb devices failed: "+err.Error())
 				return
 			}
 			if !hasDevice(out) {
-				writeError(writer, req.ReqId, "no adb device found")
+				writeError(req.ReqId, "no adb device found")
 				return
 			}
 		}
@@ -112,7 +111,7 @@ func handleConnect(writer *bufio.Writer, req Request) {
 		client = &Client{typ: connADB, adbAddr: adbAddr}
 		mu.Unlock()
 
-		writeResult(writer, req.ReqId, true)
+		writeResult(req.ReqId, true)
 		return
 	}
 
@@ -129,20 +128,20 @@ func handleConnect(writer *bufio.Writer, req Request) {
 	if privateKey != "" {
 		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
 		if err != nil {
-			writeError(writer, req.ReqId, "parse privateKey failed: "+err.Error())
+			writeError(req.ReqId, "parse privateKey failed: "+err.Error())
 			return
 		}
 		config.Auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
 	} else if password != "" {
 		config.Auth = []ssh.AuthMethod{ssh.Password(password)}
 	} else {
-		writeError(writer, req.ReqId, "no auth method provided")
+		writeError(req.ReqId, "no auth method provided")
 		return
 	}
 
 	c, err := ssh.Dial("tcp", addr, config)
 	if err != nil {
-		writeError(writer, req.ReqId, "dial failed: "+err.Error())
+		writeError(req.ReqId, "dial failed: "+err.Error())
 		return
 	}
 
@@ -151,18 +150,19 @@ func handleConnect(writer *bufio.Writer, req Request) {
 	client = &Client{typ: connSSH, sshClient: c}
 	mu.Unlock()
 
-	writeResult(writer, req.ReqId, true)
+	writeResult(req.ReqId, true)
 }
 
-func handleClose(writer *bufio.Writer, req Request) {
+func handleClose(req Request) {
 	mu.Lock()
 	closeClientLocked()
 	mu.Unlock()
 
-	writeResult(writer, req.ReqId, true)
+	writeResult(req.ReqId, true)
 }
 
 func closeClientLocked() {
+	killShellLocked()
 	if client == nil {
 		return
 	}
