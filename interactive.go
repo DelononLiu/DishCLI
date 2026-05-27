@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -490,9 +491,8 @@ func (s *ShellSession) write(data string) error {
 	if !s.started {
 		return fmt.Errorf("shell not started")
 	}
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		data += "\n"
-	}
+	// Pseudoterminal sends \r for Enter; bash expects \n
+	data = strings.ReplaceAll(data, "\r", "\n")
 	_, err := fmt.Fprint(s.stdin, data)
 	return err
 }
