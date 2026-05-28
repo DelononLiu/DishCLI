@@ -1,8 +1,8 @@
-# DishCLI 交互式协议文档
+# 协议文档（acp 模式）
 
 ## 概述
 
-DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持四种交互模式：
+`dish acp` 是 dish 命令执行网关的 AI 协议接口，通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持四种后端连接和多种交互模式。
 
 | 模式 | 动作 | 适用场景 |
 |------|------|----------|
@@ -35,11 +35,30 @@ DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持�
 
 | type | 含义 | 存在字段 |
 |------|------|----------|
-| `stdout` | 标准输出行 | `reqId`, `type`, `data` |
-| `stderr` | 错误输出行 | `reqId`, `type`, `data` |
+| `stdout` | 标准输出 | `reqId`, `type`, `data` 或 `raw`+`text` |
+| `stderr` | 错误输出 | `reqId`, `type`, `data` |
 | `result` | 操作结果 | `reqId`, `type`, `ok` |
 | `exit` | 命令/会话结束 | `reqId`, `type`, `code` |
 | `error` | 错误信息 | `reqId`, `type`, `msg` |
+
+### PTY 与输出格式
+
+`exec` 和 `shellStart` 支持 `pty` 参数，决定输出格式：
+
+**无 PTY**（默认）— 纯文本输出：
+```json
+{"reqId":"1","type":"stdout","data":"total 42\nrw-r--r--  file.txt\n"}
+```
+
+**有 PTY** — 双视图输出：
+```json
+{"reqId":"1","type":"stdout","raw":"total 42\n\u001b[32mfile\u001b[0m\n","text":"total 42\nfile\n"}
+```
+
+| 字段 | 含义 |
+|------|------|
+| `raw` | 原始终端字节流（含 ANSI 控制字符） |
+| `text` | 剥离控制字符后的纯文本 |
 
 ---
 
@@ -47,7 +66,7 @@ DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持�
 
 ### connect
 
-建立到目标的连接，所有后续 `exec` 和 `gdb*` 动作依赖此连接。
+建立到目标的连接，所有后续动作依赖此连接。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
@@ -57,8 +76,7 @@ DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持�
 | `user` | string | SSH | SSH 用户名 |
 | `password` | string | SSH | SSH 密码 |
 | `privateKey` | string | SSH | SSH 私钥内容（与 password 二选一） |
-
-**示例：**
+| `pty` | bool | 否 | 是否分配 PTY（默认 false，local 模式强制 false） |
 
 ```bash
 # Local
@@ -69,16 +87,8 @@ DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持�
 {"reqId":"1","action":"connect","params":{"host":"192.168.1.100","user":"root","password":"secret"}}
 # → {"reqId":"1","type":"result","ok":true}
 
-# Telnet
+# Telnet（telnet 协议强制有 PTY，输出始终含 raw+text）
 {"reqId":"1","action":"connect","params":{"type":"telnet","host":"192.168.1.200","port":23}}
-# → {"reqId":"1","type":"result","ok":true}
-
-# ADB (USB)
-{"reqId":"1","action":"connect","params":{"type":"adb"}}
-# → {"reqId":"1","type":"result","ok":true}
-
-# ADB (Network)
-{"reqId":"1","action":"connect","params":{"type":"adb","host":"192.168.1.50"}}
 # → {"reqId":"1","type":"result","ok":true}
 ```
 
@@ -95,40 +105,38 @@ DishCLI 通过 STDIN/STDOUT 单行 JSON 协议提供统一流式接口。支持�
 
 ## 2. One-Shot 执行（exec）
 
-执行一条命令，等待完成后返回。支持 Local / SSH / Telnet / ADB 四种后端。
+执行一条命令，完成后返回。支持四种后端。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cmd` | string | 是 | 要执行的命令 |
+| `pty` | bool | 否 | 是否分配 PTY（默认 false） |
 
 **响应流：** `stdout` (0~N 条) → `stderr` (0~N 条) → `exit`
 
 ```bash
+# 无 PTY（纯文本）
 {"reqId":"1","action":"exec","params":{"cmd":"ls -la /tmp"}}
 # → {"reqId":"1","type":"stdout","data":"total 8"}
-# → {"reqId":"1","type":"stdout","data":"drwxrwxrwt  2 root root 4096 ..."}
-# → {"reqId":"1","type":"exit","code":0}
-```
 
-Telnet 模式下通过 500ms 空闲超时判断命令完成，其余模式通过进程/会话退出信号。
+# 有 PTY（SSH 模式下带颜色输出）
+{"reqId":"1","action":"exec","params":{"cmd":"ls -la /tmp","pty":true}}
+# → {"reqId":"1","type":"stdout","raw":"\u001b[34mtotal 8\u001b[0m","text":"total 8"}
+```
 
 ---
 
 ## 3. GDB 交互式调试
 
-维护常驻 `gdb` 进程，通过 `(gdb)` 提示符状态机实现一问一答的交互。
+维持常驻 `gdb` 进程，通过 `(gdb)` 提示符状态机实现一问一答。
 
 ### gdbStart
-
-启动 GDB 会话。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `program` | string | 否 | 要调试的程序路径 |
 
 支持后端：Local、SSH、Telnet。**ADB 不支持。**
-
-**响应流：** `stdout` (GDB 启动信息) → `result` → `exit`
 
 ```bash
 {"reqId":"1","action":"gdbStart","params":{"program":"./a.out"}}
@@ -139,26 +147,17 @@ Telnet 模式下通过 500ms 空闲超时判断命令完成，其余模式通过
 
 ### gdbCmd
 
-向活跃 GDB 会话发送命令。
-
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `cmd` | string | 是 | GDB 命令 |
 
-**响应流：** `stdout` (命令输出) → `exit`
-
 ```bash
 {"reqId":"2","action":"gdbCmd","params":{"cmd":"bt full"}}
 # → {"reqId":"2","type":"stdout","data":"#0  0x00007ffff7a..."}
-# → {"reqId":"2","type":"stdout","data":"#1  0x0000555555..."}
 # → {"reqId":"2","type":"exit","code":0}
 ```
 
 ### gdbExit
-
-退出 GDB 会话。发送 `quit` 命令，等待最多 3 秒后强制清理。
-
-**响应流：** `result` → `exit`
 
 ```bash
 {"reqId":"3","action":"gdbExit"}
@@ -166,49 +165,39 @@ Telnet 模式下通过 500ms 空闲超时判断命令完成，其余模式通过
 # → {"reqId":"3","type":"exit","code":0}
 ```
 
-**GDB 会话生命周期：**
-- `close` 动作会自动清理活跃的 GDB 会话
-- 再次调用 `gdbStart` 会自动关闭已有会话再开启新的
-- GDB 内部的 `quit` 命令效果等同于 `gdbExit`
-
 ---
 
 ## 4. Shell 交互式会话
 
-启动本地 bash（或指定 shell）进程，通过 **push 模式**实时推送输出，适合长时间运行的交互式命令。
-
-与 GDB 不同，Shell 会话的 stdout/stderr 输出通过后台协程主动推送，**无需轮询**。
+启动 Shell 进程，通过 push 模式实时推送输出。
 
 ### shellStart
-
-启动 Shell 会话。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `shell` | string | 否 | Shell 路径，默认 `bash` |
 | `cwd` | string | 否 | 工作目录 |
+| `pty` | bool | 否 | 是否分配 PTY（默认 false） |
 
-**注意：当前仅支持 Local 模式。** Shell 以 `--norc --noprofile -i` 参数启动。
-
-**响应流：** `result` → `exit`
+**注意：** `pty=true` 时输出包含 `raw` + `text` 双字段，`pty=false` 时仅 `data`。
 
 ```bash
+# 无 PTY
 {"reqId":"1","action":"shellStart","params":{"shell":"bash","cwd":"/tmp"}}
 # → {"reqId":"1","type":"result","ok":true}
 # → {"reqId":"1","type":"exit","code":0}
+
+# 有 PTY（支持 top/vim 等终端程序）
+{"reqId":"1","action":"shellStart","params":{"pty":true}}
 ```
 
 ### shellWrite
-
-向 Shell 进程的 STDIN 写入数据。
 
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `data` | string | 是 | 要写入的数据 |
 
-**重要：** `data` 需要以 `\n` 结尾来触发命令执行。`\r` 会自动转换为 `\n`。
-
-**响应流：** `result` → `exit`
+**重要：** `data` 需要以 `\n` 结尾触发命令执行。`\r` 自动转换为 `\n`。
 
 ```bash
 {"reqId":"2","action":"shellWrite","params":{"data":"ls -la\n"}}
@@ -218,10 +207,6 @@ Telnet 模式下通过 500ms 空闲超时判断命令完成，其余模式通过
 
 ### shellStop
 
-停止 Shell 会话，杀死 Shell 进程。
-
-**响应流：** `result` → `exit`
-
 ```bash
 {"reqId":"3","action":"shellStop"}
 # → {"reqId":"3","type":"result","ok":true}
@@ -230,33 +215,19 @@ Telnet 模式下通过 500ms 空闲超时判断命令完成，其余模式通过
 
 ### Push 输出协议
 
-Shell 会话的实时输出通过 **固定 reqId `_shell_output`** 推送：
+Shell 的实时输出通过固定 `reqId: _shell_output` 推送：
 
-| type | 含义 |
-|------|------|
-| `stdout` | Shell 的标准输出 |
-| `stderr` | Shell 的标准错误/提示符 |
-
+**无 PTY：**
 ```json
-{"reqId":"_shell_output","type":"stderr","data":"bash-5.1$ "}
 {"reqId":"_shell_output","type":"stdout","data":"hello world\n"}
 ```
 
-Push 输出与请求-响应的回复流**交错出现**，客户端应通过 `reqId` 字段区分：
-- 请求的响应：`reqId` 与请求一致
-- Shell 实时输出：`reqId` 为固定值 `_shell_output`
-
-### Shell 会话生命周期
-
-```
-shellStart → [shellWrite → (push输出)]* → shellStop
-     ↑                                          |
-     └───────────── 再次 shellStart ────────────┘
+**有 PTY：**
+```json
+{"reqId":"_shell_output","type":"stdout","raw":"\u001b[32mhello world\u001b[0m\n","text":"hello world\n"}
 ```
 
-- `close` 动作自动停止活跃的 Shell 会话
-- 再次调用 `shellStart` 会自动停止已有会话再开启新的
-- `exit` 事件表示写入操作已确认，**不是** Shell 进程退出
+Push 输出与请求-响应流交错出现，客户端通过 `reqId` 字段区分。
 
 ---
 
@@ -265,111 +236,57 @@ shellStart → [shellWrite → (push输出)]* → shellStop
 ### 本地执行 + GDB 调试
 
 ```bash
-echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dishcli --json
-echo '{"reqId":"2","action":"gdbStart","params":{"program":"./a.out"}}' | dishcli --json
-echo '{"reqId":"3","action":"gdbCmd","params":{"cmd":"break main"}}' | dishcli --json
-echo '{"reqId":"4","action":"gdbCmd","params":{"cmd":"run"}}' | dishcli --json
-echo '{"reqId":"5","action":"gdbCmd","params":{"cmd":"bt"}}' | dishcli --json
-echo '{"reqId":"6","action":"gdbExit"}' | dishcli --json
-echo '{"reqId":"7","action":"close"}' | dishcli --json
+echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dish acp
+echo '{"reqId":"2","action":"gdbStart","params":{"program":"./a.out"}}' | dish acp
+echo '{"reqId":"3","action":"gdbCmd","params":{"cmd":"break main"}}' | dish acp
+echo '{"reqId":"4","action":"gdbCmd","params":{"cmd":"run"}}' | dish acp
+echo '{"reqId":"5","action":"gdbCmd","params":{"cmd":"bt"}}' | dish acp
+echo '{"reqId":"6","action":"gdbExit"}' | dish acp
+echo '{"reqId":"7","action":"close"}' | dish acp
 ```
 
 ### Shell 交互式会话
 
 ```bash
-echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dishcli --json
-echo '{"reqId":"2","action":"shellStart","params":{}}' | dishcli --json
-echo '{"reqId":"3","action":"shellWrite","params":{"data":"cd /tmp && pwd\n"}}' | dishcli --json
-echo '{"reqId":"4","action":"shellWrite","params":{"data":"echo hello\n"}}' | dishcli --json
-echo '{"reqId":"5","action":"shellStop"}' | dishcli --json
-echo '{"reqId":"6","action":"close"}' | dishcli --json
+echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dish acp
+echo '{"reqId":"2","action":"shellStart","params":{}}' | dish acp
+echo '{"reqId":"3","action":"shellWrite","params":{"data":"cd /tmp && pwd\n"}}' | dish acp
+echo '{"reqId":"4","action":"shellWrite","params":{"data":"echo hello\n"}}' | dish acp
+echo '{"reqId":"5","action":"shellStop"}' | dish acp
+echo '{"reqId":"6","action":"close"}' | dish acp
 ```
-
-> 注意：上述 `echo` 示例中 `\n` 在 JSON 字符串内需要写成字面 `\\n`。实际开发中建议使用 JSON 库序列化。
 
 ---
 
-## 6. 二次开发指引
+## 6. 响应格式说明
 
-### 架构概览
+所有动作的输出 `stdout`/`stderr` 事件格式由 PTY 参数决定：
+
+| PTY | `stdout` 字段 | 用途 |
+|-----|---------------|------|
+| `false` | `data` | 纯文本，直接给 AI / 日志 |
+| `true` | `raw` + `text` | `raw` 给终端渲染，`text` 给 AI / 日志 |
+
+---
+
+## 7. 架构
 
 ```
 ┌──────────┐  JSON (stdin)   ┌──────────┐
-│  Client  │ ──────────────> │  DishCLI │
-│ (KCode/  │ <────────────── │ (Go)     │
-│  Python/ │  JSON (stdout)  │          │
-│  等)     │                 └──────────┘
-└──────────┘
+│  Client  │ ──────────────> │  dish  │
+│ (AI /    │ <────────────── │  (Go)    │
+│  KCode ) │  JSON (stdout)  │          │
+└──────────┘                 └──────────┘
 ```
-
-### 核心文件
-
-| 文件 | 职责 |
-|------|------|
-| `main.go` | 入口 + JSON 请求路由 |
-| `client.go` | 连接管理（Local/SSH/Telnet/ADB） |
-| `oneshot.go` | One-Shot 命令执行（四种后端） |
-| `interactive.go` | GDB 会话 + Shell 会话 |
 
 ### 响应格式一致
 
-所有动作的输出（无论是 `exec`、`gdbCmd` 还是 shell push）的 `stdout`/`stderr` 事件格式完全一致：
+无论 `exec`、`gdbCmd` 还是 shell push，`stdout` 格式完全一致：
 
 ```json
 {"reqId":"...","type":"stdout","data":"..."}
+// 或 PTY 模式下：
+{"reqId":"...","type":"stdout","raw":"...","text":"..."}
 ```
 
 上层渲染器无需区分来源。
-
-### 状态机说明
-
-**GDB 会话** 使用基于字节的 `(gdb)` 提示符检测：
-
-```
-开始 → 读取字节 → 检测 (gdb) 提示符 → 输出行 → 等待下一个命令
-```
-
-检测到 `(gdb) ` 后返回 `exit` 表示命令执行完毕。
-
-**Shell 会话** 使用后台协程连续读取 stdout/stderr：
-
-```
-shellStart → 启动进程 → [协程: 读 stdout → push + buffer]
-                     → [协程: 读 stderr → push]
-shellWrite → 写入 stdin
-shellStop  → cancel context + kill 进程
-```
-
-### 添加新的交互模式
-
-要添加新的交互动作，需要：
-
-1. 在 `main.go` 的 `switch req.Action` 中添加新路由
-2. 在 `interactive.go`（或新文件）中实现处理函数
-3. 在 `handleExecAction` 中如果涉及到 GDB 类型的请求路由
-4. 在 `client.go` 的 `closeClientLocked` 中添加清理逻辑
-5. 在 `--help` 和 `README.md` 中添加文档
-
-### 测试方式
-
-```bash
-# 构建
-go build -o dishcli .
-
-# 直接用 echo 测试（注意 \\n 转义）
-echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | ./dishcli --json
-
-# 使用 Python REPL（手动交互测试）
-python3 repl.py
-
-# 使用 Python 脚本自动化测试
-python3 -c "
-import subprocess, json
-proc = subprocess.Popen(['./dishcli', '--json'],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-proc.stdin.write(json.dumps({'reqId':'1','action':'connect','params':{'type':'local'}}) + '\n')
-proc.stdin.write(json.dumps({'reqId':'2','action':'exec','params':{'cmd':'echo hi'}}) + '\n')
-proc.stdin.close()
-print(proc.stdout.read())
-"
-```
