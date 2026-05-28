@@ -84,8 +84,6 @@ func main() {
 			handleShellStart(req)
 		case "shellWrite":
 			handleShellWrite(req)
-		case "shellRead":
-			handleShellRead(req)
 		case "shellStop":
 			handleShellStop(req)
 		default:
@@ -155,6 +153,7 @@ func handleShellStart(req Request) {
 
 	activeShell = sess
 	writeResp(Response{ReqId: req.ReqId, Type: "result", Ok: true})
+	writeResp(Response{ReqId: req.ReqId, Type: "exit", Code: 0})
 }
 
 func handleShellWrite(req Request) {
@@ -179,23 +178,7 @@ func handleShellWrite(req Request) {
 	}
 
 	writeResp(Response{ReqId: req.ReqId, Type: "result", Ok: true})
-}
-
-func handleShellRead(req Request) {
-	shellSessMu.Lock()
-	sess := activeShell
-	shellSessMu.Unlock()
-
-	if sess == nil {
-		writeError(req.ReqId, "no active shell")
-		return
-	}
-
-	data := sess.readOutput()
-	if data != "" {
-		writeStdout(req.ReqId, data)
-	}
-	writeExit(req.ReqId, 0)
+	writeResp(Response{ReqId: req.ReqId, Type: "exit", Code: 0})
 }
 
 func handleShellStop(req Request) {
@@ -229,7 +212,6 @@ Actions:
   gdbExit       Exit GDB session
   shellStart    Start interactive shell (params: shell, cwd)
   shellWrite    Write data to shell stdin (params: data)
-  shellRead     Read buffered shell output (returns stdout + exit)
   shellStop     Stop interactive shell
   close         Disconnect device
 

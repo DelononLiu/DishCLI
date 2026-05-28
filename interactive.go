@@ -393,8 +393,6 @@ type ShellSession struct {
 	cmd     *exec.Cmd
 	stdin   io.WriteCloser
 	cancel  context.CancelFunc
-	mu      sync.Mutex
-	buf     bytes.Buffer
 	started bool
 }
 
@@ -448,10 +446,6 @@ func newShellSession(shell string, cwd string) *ShellSession {
 			n, err := stdout.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
-				sess.mu.Lock()
-				sess.buf.Write(buf[:n])
-				sess.mu.Unlock()
-				// Push to KCode immediately
 				writeShellOutput(chunk)
 			}
 			if err != nil {
@@ -460,7 +454,6 @@ func newShellSession(shell string, cwd string) *ShellSession {
 		}
 	}()
 
-	// Background reader for stderr (merged into same buffer and push)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -472,9 +465,6 @@ func newShellSession(shell string, cwd string) *ShellSession {
 			n, err := stderr.Read(buf)
 			if n > 0 {
 				chunk := string(buf[:n])
-				sess.mu.Lock()
-				sess.buf.Write(buf[:n])
-				sess.mu.Unlock()
 				writeShellStderr(chunk)
 			}
 			if err != nil {
@@ -494,17 +484,6 @@ func (s *ShellSession) write(data string) error {
 	data = strings.ReplaceAll(data, "\r", "\n")
 	_, err := fmt.Fprint(s.stdin, data)
 	return err
-}
-
-func (s *ShellSession) readOutput() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.buf.Len() == 0 {
-		return ""
-	}
-	data := s.buf.String()
-	s.buf.Reset()
-	return data
 }
 
 func (s *ShellSession) close() {

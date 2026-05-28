@@ -106,7 +106,30 @@ echo '{"reqId":"4","action":"gdbExit"}' | dishcli --json
 
 GDB 进程运行在远程机器上，本地仅通过 SSH 通道转发 stdin/stdout，所有调试数据不出远程网络。
 
-### 7. 会话中途退出与重开
+### 7. Shell 交互式会话
+
+Shell 模式下 DishCLI 启动本地 bash（或指定 shell）进程，通过 push 方式实时推送输出，适合长时间运行的交互式命令（如 `top`、`python` 等）。
+
+```bash
+# 1. 连接（local 模式）
+echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dishcli --json
+
+# 2. 启动 shell 会话
+echo '{"reqId":"2","action":"shellStart","params":{"shell":"bash","cwd":"/tmp"}}' | dishcli --json
+
+# 3. 下发命令（输出通过 reqId="_shell_output" 实时推送）
+echo '{"reqId":"3","action":"shellWrite","params":{"data":"ls -la\n"}}' | dishcli --json
+
+# 4. 停止 shell 会话
+echo '{"reqId":"4","action":"shellStop"}' | dishcli --json
+```
+
+注意事项：
+- Shell 输出通过 `reqId: _shell_output` 的 `stdout`/`stderr` 事件实时推送，无需轮询
+- `shellWrite` 的 `data` 参数需要以 `\n` 结尾触发命令执行
+- 当前仅支持 Local 模式
+
+### 8. 会话中途退出与重开
 
 ```bash
 echo '{"reqId":"1","action":"gdbStart","params":{}}' | dishcli --json
@@ -127,6 +150,9 @@ echo '{"reqId":"3","action":"gdbStart","params":{"program":"/bin/ls"}}' | dishcl
 | `gdbStart` | 启动 GDB 交互式会话 |
 | `gdbCmd` | 在活跃 GDB 会话中下发命令 |
 | `gdbExit` | 退出 GDB 会话 |
+| `shellStart` | 启动交互式 Shell 会话（local 模式） |
+| `shellWrite` | 向 Shell 写入数据（params: `data`） |
+| `shellStop` | 停止 Shell 会话 |
 | `close` | 关闭连接，清理所有资源 |
 
 ## 连接类型
