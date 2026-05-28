@@ -1,15 +1,12 @@
-package main
+package engine
 
 import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +17,7 @@ const gdbPrompt = "(gdb) "
 
 type GdbSession struct {
 	mu         sync.Mutex
-	clientTyp  connType
+	clientTyp  ConnType
 	stdin      io.WriteCloser
 	stdout     io.Reader
 	stderr     io.Reader
@@ -35,7 +32,7 @@ var (
 )
 
 type InteractiveExecutor struct {
-	clientTyp connType
+	clientTyp ConnType
 }
 
 func (e *InteractiveExecutor) Exec(ctx context.Context, action string, params map[string]interface{}) <-chan OutputLine {
@@ -68,22 +65,22 @@ func (e *InteractiveExecutor) start(ctx context.Context, params map[string]inter
 	sess := &GdbSession{clientTyp: e.clientTyp}
 
 	switch e.clientTyp {
-	case connLocal:
+	case ConnLocal:
 		if err := e.startLocal(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
-	case connSSH:
+	case ConnSSH:
 		if err := e.startSSH(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
-	case connTelnet:
+	case ConnTelnet:
 		if err := e.startTelnet(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
-	case connADB:
+	case ConnADB:
 		ch <- OutputLine{Type: "error", Msg: "gdb over ADB not supported"}
 		return
 	}
@@ -164,11 +161,11 @@ func (e *InteractiveExecutor) exit(ctx context.Context, ch chan<- OutputLine) {
 	done := make(chan error, 1)
 	go func() {
 		switch sess.clientTyp {
-		case connLocal:
+		case ConnLocal:
 			done <- sess.localCmd.Wait()
-		case connSSH:
+		case ConnSSH:
 			done <- sess.sshSession.Wait()
-		case connTelnet:
+		case ConnTelnet:
 			done <- nil
 		}
 	}()
@@ -380,148 +377,4 @@ func cleanupInteractiveSession() {
 	sessionMu.Lock()
 	cleanupSessionLocked()
 	sessionMu.Unlock()
-}
-
-// ─── Shell Session (general interactive shell with push-based stdout) ───
-
-var (
-	activeShell *ShellSession
-	shellSessMu sync.Mutex
-)
-
-type ShellSession struct {
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	cancel  context.CancelFunc
-	started bool
-}
-
-func newShellSession(shell string, cwd string) *ShellSession {
-	ctx, cancel := context.WithCancel(context.Background())
-
-	args := []string{"--norc", "--noprofile", "-i"}
-
-	cmd := exec.CommandContext(ctx, shell, args...)
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		cancel()
-		return nil
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		cancel()
-		return nil
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		cancel()
-		return nil
-	}
-
-	if err := cmd.Start(); err != nil {
-		cancel()
-		return nil
-	}
-
-	sess := &ShellSession{
-		cmd:     cmd,
-		stdin:   stdin,
-		cancel:  cancel,
-		started: true,
-	}
-
-	// Background reader for stdout — pushes events to os.Stdout directly
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			n, err := stdout.Read(buf)
-			if n > 0 {
-				chunk := string(buf[:n])
-				writeShellOutput(chunk)
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			default:
-			}
-			n, err := stderr.Read(buf)
-			if n > 0 {
-				chunk := string(buf[:n])
-				writeShellStderr(chunk)
-			}
-			if err != nil {
-				return
-			}
-		}
-	}()
-
-	return sess
-}
-
-func (s *ShellSession) write(data string) error {
-	if !s.started {
-		return fmt.Errorf("shell not started")
-	}
-	// Pseudoterminal sends \r for Enter; bash expects \n
-	data = strings.ReplaceAll(data, "\r", "\n")
-	_, err := fmt.Fprint(s.stdin, data)
-	return err
-}
-
-func (s *ShellSession) close() {
-	s.cancel()
-	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Kill()
-	}
-}
-
-func killShellLocked() {
-	if activeShell != nil {
-		activeShell.close()
-		activeShell = nil
-	}
-}
-
-// ─── Shell output push helpers (called from background goroutines) ───
-
-func writeShellOutput(data string) {
-	stdoutMu.Lock()
-	defer stdoutMu.Unlock()
-	resp, _ := json.Marshal(Response{
-		ReqId: "_shell_output",
-		Type:  "stdout",
-		Data:  data,
-	})
-	os.Stdout.Write(resp)
-	os.Stdout.Write([]byte{'\n'})
-}
-
-func writeShellStderr(data string) {
-	stdoutMu.Lock()
-	defer stdoutMu.Unlock()
-	resp, _ := json.Marshal(Response{
-		ReqId: "_shell_output",
-		Type:  "stderr",
-		Data:  data,
-	})
-	os.Stdout.Write(resp)
-	os.Stdout.Write([]byte{'\n'})
 }

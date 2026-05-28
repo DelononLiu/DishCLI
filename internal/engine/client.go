@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"bytes"
@@ -11,17 +11,17 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type connType int
+type ConnType int
 
 const (
-	connSSH connType = iota
-	connTelnet
-	connADB
-	connLocal
+	ConnSSH ConnType = iota
+	ConnTelnet
+	ConnADB
+	ConnLocal
 )
 
 type Client struct {
-	typ connType
+	typ ConnType
 
 	sshClient  *ssh.Client
 	sshSession *ssh.Session
@@ -36,7 +36,7 @@ var (
 	mu     sync.Mutex
 )
 
-func handleConnect(req Request) {
+func HandleConnect(req Request) {
 	params := req.Params
 	host, _ := params["host"].(string)
 	port := 22
@@ -44,29 +44,29 @@ func handleConnect(req Request) {
 		port = int(p)
 	}
 
-	typ := connSSH
+	typ := ConnSSH
 	switch t, _ := params["type"].(string); t {
 	case "telnet":
-		typ = connTelnet
+		typ = ConnTelnet
 	case "adb":
-		typ = connADB
+		typ = ConnADB
 	case "local":
-		typ = connLocal
+		typ = ConnLocal
 	}
 
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
-	if typ == connLocal {
+	if typ == ConnLocal {
 		mu.Lock()
 		closeClientLocked()
-		client = &Client{typ: connLocal}
+		client = &Client{typ: ConnLocal}
 		mu.Unlock()
 
 		writeResult(req.ReqId, true)
 		return
 	}
 
-	if typ == connTelnet {
+	if typ == ConnTelnet {
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
 			writeError(req.ReqId, "dial failed: "+err.Error())
@@ -75,14 +75,14 @@ func handleConnect(req Request) {
 
 		mu.Lock()
 		closeClientLocked()
-		client = &Client{typ: connTelnet, telnetConn: conn}
+		client = &Client{typ: ConnTelnet, telnetConn: conn}
 		mu.Unlock()
 
 		writeResult(req.ReqId, true)
 		return
 	}
 
-	if typ == connADB {
+	if typ == ConnADB {
 		if host != "" {
 			out, err := exec.Command("adb", "connect", addr).CombinedOutput()
 			if err != nil {
@@ -108,7 +108,7 @@ func handleConnect(req Request) {
 
 		mu.Lock()
 		closeClientLocked()
-		client = &Client{typ: connADB, adbAddr: adbAddr}
+		client = &Client{typ: ConnADB, adbAddr: adbAddr}
 		mu.Unlock()
 
 		writeResult(req.ReqId, true)
@@ -147,13 +147,13 @@ func handleConnect(req Request) {
 
 	mu.Lock()
 	closeClientLocked()
-	client = &Client{typ: connSSH, sshClient: c}
+	client = &Client{typ: ConnSSH, sshClient: c}
 	mu.Unlock()
 
 	writeResult(req.ReqId, true)
 }
 
-func handleClose(req Request) {
+func HandleClose(req Request) {
 	mu.Lock()
 	closeClientLocked()
 	mu.Unlock()
@@ -178,7 +178,7 @@ func closeClientLocked() {
 		client.telnetConn.Close()
 		client.telnetConn = nil
 	}
-	if client.typ == connADB && client.adbAddr != "" {
+	if client.typ == ConnADB && client.adbAddr != "" {
 		exec.Command("adb", "disconnect", client.adbAddr).Run()
 	}
 	cleanupInteractiveSession()

@@ -6,13 +6,13 @@ LDFLAGS="-s -w"
 
 mkdir -p dist
 
-echo "Building dishcli v${VERSION}"
+echo "Building dish v${VERSION}"
 
 echo "  linux/amd64 ..."
-GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/dishcli .
+GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/dish ./cmd/dish
 
 echo "  windows/amd64 ..."
-GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/dishcli-windows-amd64.exe .
+GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o dist/dish-windows-amd64.exe ./cmd/dish
 
 echo "Done"
 ls -lh dist/

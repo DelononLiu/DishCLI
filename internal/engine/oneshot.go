@@ -1,4 +1,4 @@
-package main
+package engine
 
 import (
 	"bufio"
@@ -33,13 +33,13 @@ func (e *OneShotExecutor) Exec(ctx context.Context, action string, params map[st
 		mu.Unlock()
 
 		switch c.typ {
-		case connSSH:
+		case ConnSSH:
 			sshExec(ctx, c, cmdStr, ch)
-		case connTelnet:
+		case ConnTelnet:
 			telnetExec(ctx, c, cmdStr, ch)
-		case connADB:
+		case ConnADB:
 			adbExec(ctx, c, cmdStr, ch)
-		case connLocal:
+		case ConnLocal:
 			localExec(ctx, cmdStr, ch)
 		}
 	}()
@@ -417,5 +417,3 @@ func handleTelnetNegotiation(conn net.Conn, data []byte) []byte {
 	}
 	return result
 }
-
-

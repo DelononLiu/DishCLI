@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 import sys, os, json, subprocess, shlex, threading, queue
 
-HISTFILE = os.path.expanduser("~/.dishcli_repl_history")
+HISTFILE = os.path.expanduser("~/.dish_repl_history")
 
 
 def main():
-    args = sys.argv[1:] or ["./dishcli"]
-    if "--json" not in args:
-        args.append("--json")
+    args = sys.argv[1:] or ["./dish", "acp"])
 
     proc = subprocess.Popen(
         args, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -29,7 +27,7 @@ def main():
 
     _start_output_pump(proc)
 
-    print("dishcli REPL — /help for commands, ^D to exit")
+    print("dish REPL — /help for commands, ^D to exit")
     while True:
         try:
             line = input("repl> ")

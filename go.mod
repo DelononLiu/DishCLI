@@ -1,4 +1,4 @@
-module dishcli
+module dish
 
 go 1.21
 
