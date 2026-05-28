@@ -2,9 +2,9 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"net"
 	"os/exec"
+	"strconv"
 	"sync"
 	"time"
 
@@ -54,7 +54,7 @@ func handleConnect(req Request) {
 		typ = connLocal
 	}
 
-	addr := fmt.Sprintf("%s:%d", host, port)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
 	if typ == connLocal {
 		mu.Lock()

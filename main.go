@@ -21,9 +21,9 @@ type Request struct {
 type Response struct {
 	ReqId string `json:"reqId"`
 	Type  string `json:"type"`
-	Ok    bool   `json:"ok,omitempty"`
+	Ok    bool   `json:"ok"`
 	Data  string `json:"data,omitempty"`
-	Code  int    `json:"code,omitempty"`
+	Code  int    `json:"code"`
 	Msg   string `json:"msg,omitempty"`
 }
 
@@ -58,6 +58,7 @@ func main() {
 
 	reqCh := make(chan Request, 100)
 	go func() {
+		defer close(reqCh)
 		scanner := bufio.NewScanner(os.Stdin)
 		for scanner.Scan() {
 			line := scanner.Text()
