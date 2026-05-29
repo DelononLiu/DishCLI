@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"net"
 	"os/exec"
 	"strconv"
@@ -39,10 +38,6 @@ var (
 func HandleConnect(req Request) {
 	params := req.Params
 	host, _ := params["host"].(string)
-	port := 22
-	if p, ok := params["port"].(float64); ok {
-		port = int(p)
-	}
 
 	typ := ConnSSH
 	switch t, _ := params["type"].(string); t {
@@ -54,63 +49,46 @@ func HandleConnect(req Request) {
 		typ = ConnLocal
 	}
 
-	addr := net.JoinHostPort(host, strconv.Itoa(port))
-
-	if typ == ConnLocal {
-		mu.Lock()
-		closeClientLocked()
-		client = &Client{typ: ConnLocal}
-		mu.Unlock()
-
-		writeResult(req.ReqId, true)
-		return
+	port := 22
+	if p, ok := params["port"].(float64); ok {
+		port = int(p)
+	} else if typ == ConnTelnet {
+		port = 23
+	} else if typ == ConnADB {
+		port = 5555
 	}
 
-	if typ == ConnTelnet {
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+
+	mu.Lock()
+	closeClientLocked()
+	c := &Client{typ: typ}
+	client = c
+	mu.Unlock()
+
+	switch typ {
+	case ConnLocal:
+		writeResult(req.ReqId, true)
+		return
+
+	case ConnTelnet:
 		conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 		if err != nil {
 			writeError(req.ReqId, "dial failed: "+err.Error())
 			return
 		}
-
-		mu.Lock()
-		closeClientLocked()
-		client = &Client{typ: ConnTelnet, telnetConn: conn}
-		mu.Unlock()
-
+		c.telnetConn = conn
 		writeResult(req.ReqId, true)
 		return
-	}
 
-	if typ == ConnADB {
-		if host != "" {
-			out, err := exec.Command("adb", "connect", addr).CombinedOutput()
-			if err != nil {
-				writeError(req.ReqId, "adb connect failed: "+string(out))
-				return
-			}
-		} else {
-			out, err := exec.Command("adb", "devices").Output()
-			if err != nil {
-				writeError(req.ReqId, "adb devices failed: "+err.Error())
-				return
-			}
-			if !hasDevice(out) {
-				writeError(req.ReqId, "no adb device found")
-				return
-			}
+	case ConnADB:
+		out, err := exec.Command("adb", "connect", addr).CombinedOutput()
+		if err != nil {
+			writeError(req.ReqId, "adb connect failed: "+string(out))
+			client = nil
+			return
 		}
-
-		adbAddr := addr
-		if host == "" {
-			adbAddr = ""
-		}
-
-		mu.Lock()
-		closeClientLocked()
-		client = &Client{typ: ConnADB, adbAddr: adbAddr}
-		mu.Unlock()
-
+		c.adbAddr = addr
 		writeResult(req.ReqId, true)
 		return
 	}
@@ -119,37 +97,18 @@ func HandleConnect(req Request) {
 	password, _ := params["password"].(string)
 	privateKey, _ := params["privateKey"].(string)
 
-	config := &ssh.ClientConfig{
-		User:            user,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         10 * time.Second,
-	}
-
-	if privateKey != "" {
-		signer, err := ssh.ParsePrivateKey([]byte(privateKey))
-		if err != nil {
-			writeError(req.ReqId, "parse privateKey failed: "+err.Error())
-			return
-		}
-		config.Auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
-	} else if password != "" {
-		config.Auth = []ssh.AuthMethod{ssh.Password(password)}
-	} else {
-		writeError(req.ReqId, "no auth method provided")
-		return
-	}
-
-	c, err := ssh.Dial("tcp", addr, config)
+	sshClient, err := dialSSH(host, strconv.Itoa(port), user, password, privateKey)
 	if err != nil {
-		writeError(req.ReqId, "dial failed: "+err.Error())
+		writeError(req.ReqId, "ssh dial failed: "+err.Error())
+		client = nil
 		return
 	}
-
-	mu.Lock()
-	closeClientLocked()
-	client = &Client{typ: ConnSSH, sshClient: c}
-	mu.Unlock()
-
+	if sshClient == nil {
+		writeError(req.ReqId, "no auth method provided")
+		client = nil
+		return
+	}
+	c.sshClient = sshClient
 	writeResult(req.ReqId, true)
 }
 
@@ -183,18 +142,4 @@ func closeClientLocked() {
 	}
 	cleanupInteractiveSession()
 	client = nil
-}
-
-func hasDevice(out []byte) bool {
-	lines := bytes.Split(out, []byte("\n"))
-	for _, line := range lines {
-		trim := bytes.TrimSpace(line)
-		if len(trim) == 0 {
-			continue
-		}
-		if bytes.Contains(trim, []byte("\tdevice")) {
-			return true
-		}
-	}
-	return false
 }

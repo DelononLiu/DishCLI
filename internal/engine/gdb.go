@@ -66,23 +66,25 @@ func (e *InteractiveExecutor) start(ctx context.Context, params map[string]inter
 
 	switch e.clientTyp {
 	case ConnLocal:
-		if err := e.startLocal(sess, prog); err != nil {
+		if err := startGdbLocal(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
 	case ConnSSH:
-		if err := e.startSSH(sess, prog); err != nil {
+		if err := startGdbSSH(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
 	case ConnTelnet:
-		if err := e.startTelnet(sess, prog); err != nil {
+		if err := startGdbTelnet(sess, prog); err != nil {
 			ch <- OutputLine{Type: "error", Msg: err.Error()}
 			return
 		}
 	case ConnADB:
-		ch <- OutputLine{Type: "error", Msg: "gdb over ADB not supported"}
-		return
+		if err := startGdbADB(sess, prog); err != nil {
+			ch <- OutputLine{Type: "error", Msg: err.Error()}
+			return
+		}
 	}
 
 	if err := waitForPrompt(ctx, sess, ch); err != nil {
@@ -159,16 +161,25 @@ func (e *InteractiveExecutor) exit(ctx context.Context, ch chan<- OutputLine) {
 	sess.mu.Unlock()
 
 	done := make(chan error, 1)
-	go func() {
-		switch sess.clientTyp {
-		case ConnLocal:
-			done <- sess.localCmd.Wait()
-		case ConnSSH:
-			done <- sess.sshSession.Wait()
-		case ConnTelnet:
-			done <- nil
-		}
-	}()
+	switch sess.clientTyp {
+	case ConnLocal:
+		go func() { done <- sess.localCmd.Wait() }()
+	case ConnSSH:
+		go func() { done <- sess.sshSession.Wait() }()
+	case ConnTelnet:
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				_, err := sess.stdout.Read(buf)
+				if err != nil {
+					done <- err
+					return
+				}
+			}
+		}()
+	case ConnADB:
+		go func() { done <- sess.localCmd.Wait() }()
+	}
 
 	select {
 	case <-done:
@@ -184,7 +195,7 @@ func (e *InteractiveExecutor) exit(ctx context.Context, ch chan<- OutputLine) {
 	ch <- OutputLine{Type: "exit", Code: 0}
 }
 
-func (e *InteractiveExecutor) startLocal(sess *GdbSession, prog string) error {
+func startGdbLocal(sess *GdbSession, prog string) error {
 	args := []string{"-q"}
 	if prog != "" {
 		args = append(args, prog)
@@ -212,93 +223,6 @@ func (e *InteractiveExecutor) startLocal(sess *GdbSession, prog string) error {
 	sess.stdout = stdout
 	sess.stderr = stderr
 	sess.localCmd = cmd
-	return nil
-}
-
-func (e *InteractiveExecutor) startSSH(sess *GdbSession, prog string) error {
-	mu.Lock()
-	sshClient := client.sshClient
-	mu.Unlock()
-
-	if sshClient == nil {
-		return fmt.Errorf("not connected to SSH")
-	}
-
-	session, err := sshClient.NewSession()
-	if err != nil {
-		return fmt.Errorf("new ssh session: %w", err)
-	}
-
-	stdin, err := session.StdinPipe()
-	if err != nil {
-		session.Close()
-		return fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := session.StdoutPipe()
-	if err != nil {
-		session.Close()
-		return fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderr, err := session.StderrPipe()
-	if err != nil {
-		session.Close()
-		return fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	gdbCmd := "gdb -q"
-	if prog != "" {
-		gdbCmd += " " + prog
-	}
-	if err := session.Start(gdbCmd); err != nil {
-		session.Close()
-		return fmt.Errorf("start gdb on remote: %w", err)
-	}
-
-	sess.stdin = stdin
-	sess.stdout = stdout
-	sess.stderr = stderr
-	sess.sshSession = session
-	return nil
-}
-
-func (e *InteractiveExecutor) startTelnet(sess *GdbSession, prog string) error {
-	mu.Lock()
-	conn := client.telnetConn
-	mu.Unlock()
-
-	if conn == nil {
-		return fmt.Errorf("not connected via telnet")
-	}
-
-	gdbCmd := "gdb -q"
-	if prog != "" {
-		gdbCmd += " " + prog
-	}
-
-	_, err := fmt.Fprintln(conn, gdbCmd)
-	if err != nil {
-		return fmt.Errorf("write gdb command to telnet: %w", err)
-	}
-
-	pr, pw := io.Pipe()
-
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := conn.Read(buf)
-			if err != nil {
-				pw.CloseWithError(err)
-				return
-			}
-			clean := handleTelnetNegotiation(conn, buf[:n])
-			if len(clean) > 0 {
-				pw.Write(clean)
-			}
-		}
-	}()
-
-	sess.stdin = conn
-	sess.stdout = pr
 	return nil
 }
 
