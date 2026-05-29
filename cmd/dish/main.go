@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"dish/internal/engine"
+	"dish/internal/tui"
 )
 
 func main() {
@@ -22,7 +23,10 @@ func main() {
 		return
 	}
 
-	printHelp()
+	if err := tui.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "TUI error: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func runACP() {
@@ -72,9 +76,10 @@ func writeJSON(v interface{}) {
 }
 
 func printHelp() {
-	fmt.Println(`Usage: dish <command> [options]
+	fmt.Println(`Usage: dish [command] [options]
 
 Commands:
+  (default)   Interactive TUI mode (interactive terminal)
   acp         AI protocol mode (JSON-RPC over stdio, for AI Agents)
 
 Options:
@@ -82,6 +87,6 @@ Options:
   --help, -h  Show this help message
 
 Examples:
-  echo '{"reqId":"1","action":"connect","params":{"type":"local"}}' | dish acp
-  echo '{"reqId":"2","action":"exec","params":{"cmd":"echo hello"}}' | dish acp`)
+  dish                              Start interactive TUI
+  echo '{"reqId":"1","action":"exec"}' | dish acp`)
 }
