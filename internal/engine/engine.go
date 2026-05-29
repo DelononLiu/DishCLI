@@ -24,6 +24,8 @@ type Response struct {
 	Type  string `json:"type"`
 	Ok    bool   `json:"ok"`
 	Data  string `json:"data,omitempty"`
+	Raw   string `json:"raw,omitempty"`
+	Text  string `json:"text,omitempty"`
 	Code  int    `json:"code"`
 	Msg   string `json:"msg,omitempty"`
 }
@@ -31,6 +33,8 @@ type Response struct {
 type OutputLine struct {
 	Type string
 	Data string
+	Raw  string
+	Text string
 	Code int
 	Msg  string
 	Ok   bool
@@ -97,6 +101,19 @@ func writeShellStderr(data string) {
 	os.Stdout.Write([]byte{'\n'})
 }
 
+func writeShellOutputPTY(raw, text string) {
+	stdoutMu.Lock()
+	defer stdoutMu.Unlock()
+	resp, _ := json.Marshal(Response{
+		ReqId: "_shell_output",
+		Type:  "stdout",
+		Raw:   raw,
+		Text:  text,
+	})
+	os.Stdout.Write(resp)
+	os.Stdout.Write([]byte{'\n'})
+}
+
 func HandleExecAction(req Request) {
 	mu.Lock()
 	if client == nil {
@@ -127,9 +144,14 @@ func HandleExecAction(req Request) {
 			ReqId: req.ReqId,
 			Type:  ol.Type,
 			Ok:    ol.Ok,
-			Data:  ol.Data,
 			Code:  ol.Code,
 			Msg:   ol.Msg,
+		}
+		if ol.Raw != "" {
+			resp.Raw = ol.Raw
+			resp.Text = ol.Text
+		} else {
+			resp.Data = ol.Data
 		}
 		writeResp(resp)
 	}
@@ -149,8 +171,10 @@ func HandleShellStart(req Request) {
 		shell = "bash"
 	}
 
+	usePTY, _ := params["pty"].(bool)
+
 	cwd, _ := params["cwd"].(string)
-	sess := newShellSession(shell, cwd)
+	sess := newShellSession(shell, cwd, usePTY)
 	if sess == nil {
 		writeResp(Response{ReqId: req.ReqId, Type: "error", Msg: "failed to start shell"})
 		return
@@ -205,9 +229,10 @@ type ShellSession struct {
 	stdin   io.WriteCloser
 	cancel  context.CancelFunc
 	started bool
+	usePTY  bool
 }
 
-func newShellSession(shell string, cwd string) *ShellSession {
+func newShellSession(shell string, cwd string, usePTY bool) *ShellSession {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	args := []string{"--norc", "--noprofile", "-i"}
@@ -215,6 +240,43 @@ func newShellSession(shell string, cwd string) *ShellSession {
 	cmd := exec.CommandContext(ctx, shell, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
+	}
+
+	if usePTY {
+		master, err := startWithPTY(cmd)
+		if err != nil {
+			cancel()
+			return nil
+		}
+
+		sess := &ShellSession{
+			cmd:     cmd,
+			stdin:   master,
+			cancel:  cancel,
+			started: true,
+			usePTY:  true,
+		}
+
+		go func() {
+			buf := make([]byte, 4096)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				n, err := master.Read(buf)
+				if n > 0 {
+					chunk := string(buf[:n])
+					writeShellOutputPTY(chunk, stripANSI(chunk))
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		return sess
 	}
 
 	stdin, err := cmd.StdinPipe()
@@ -290,7 +352,9 @@ func (s *ShellSession) write(data string) error {
 	if !s.started {
 		return fmt.Errorf("shell not started")
 	}
-	data = strings.ReplaceAll(data, "\r", "\n")
+	if !s.usePTY {
+		data = strings.ReplaceAll(data, "\r", "\n")
+	}
 	_, err := fmt.Fprint(s.stdin, data)
 	return err
 }

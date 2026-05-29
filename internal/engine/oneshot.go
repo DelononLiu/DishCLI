@@ -23,6 +23,8 @@ func (e *OneShotExecutor) Exec(ctx context.Context, action string, params map[st
 			return
 		}
 
+		usePTY, _ := params["pty"].(bool)
+
 		mu.Lock()
 		if client == nil {
 			mu.Unlock()
@@ -34,13 +36,21 @@ func (e *OneShotExecutor) Exec(ctx context.Context, action string, params map[st
 
 		switch c.typ {
 		case ConnSSH:
-			sshExec(ctx, c, cmdStr, ch)
+			if usePTY {
+				sshExecPTY(ctx, c, cmdStr, ch)
+			} else {
+				sshExec(ctx, c, cmdStr, ch)
+			}
 		case ConnTelnet:
 			telnetExec(ctx, c, cmdStr, ch)
 		case ConnADB:
 			adbExec(ctx, c, cmdStr, ch)
 		case ConnLocal:
-			localExec(ctx, cmdStr, ch)
+			if usePTY {
+				localExecPTY(ctx, cmdStr, ch)
+			} else {
+				localExec(ctx, cmdStr, ch)
+			}
 		}
 	}()
 	return ch
@@ -135,6 +145,91 @@ func sshExec(ctx context.Context, c *Client, cmd string, ch chan<- OutputLine) {
 	}
 }
 
+func sshExecPTY(ctx context.Context, c *Client, cmd string, ch chan<- OutputLine) {
+	mu.Lock()
+	sshClient := c.sshClient
+	mu.Unlock()
+
+	if sshClient == nil {
+		ch <- OutputLine{Type: "error", Msg: "ssh client is nil"}
+		return
+	}
+
+	session, err := sshClient.NewSession()
+	if err != nil {
+		ch <- OutputLine{Type: "error", Msg: "create session failed: " + err.Error()}
+		return
+	}
+	defer session.Close()
+
+	modes := ssh.TerminalModes{
+		ssh.ECHO:          1,
+		ssh.TTY_OP_ISPEED: 14400,
+		ssh.TTY_OP_OSPEED: 14400,
+	}
+	if err := session.RequestPty("xterm", 80, 24, modes); err != nil {
+		ch <- OutputLine{Type: "error", Msg: "request pty failed: " + err.Error()}
+		return
+	}
+
+	stdout, err := session.StdoutPipe()
+	if err != nil {
+		ch <- OutputLine{Type: "error", Msg: "stdout pipe failed: " + err.Error()}
+		return
+	}
+
+	if err := session.Start(cmd); err != nil {
+		ch <- OutputLine{Type: "error", Msg: "exec failed: " + err.Error()}
+		return
+	}
+
+	outputCh := make(chan string, 100)
+	doneCh := make(chan error, 1)
+
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				outputCh <- string(buf[:n])
+			}
+			if err != nil {
+				close(outputCh)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		doneCh <- session.Wait()
+	}()
+
+	for {
+		select {
+		case raw, ok := <-outputCh:
+			if !ok {
+				err := <-doneCh
+				exitCode := 0
+				if err != nil {
+					if exitErr, ok := err.(*ssh.ExitError); ok {
+						exitCode = exitErr.ExitStatus()
+					} else {
+						exitCode = 255
+					}
+				}
+				ch <- OutputLine{Type: "exit", Code: exitCode}
+				return
+			}
+			text := stripANSI(raw)
+			ch <- OutputLine{Type: "stdout", Raw: raw, Text: text}
+		case <-ctx.Done():
+			session.Signal(ssh.SIGKILL)
+			ch <- OutputLine{Type: "error", Msg: "command timeout"}
+			return
+		}
+	}
+}
+
 func localExec(ctx context.Context, cmd string, ch chan<- OutputLine) {
 	c := exec.Command("sh", "-c", cmd)
 
@@ -202,6 +297,62 @@ func localExec(ctx context.Context, cmd string, ch chan<- OutputLine) {
 			}
 			ch <- OutputLine{Type: "exit", Code: exitCode}
 			return
+		case <-ctx.Done():
+			c.Process.Kill()
+			ch <- OutputLine{Type: "error", Msg: "command timeout"}
+			return
+		}
+	}
+}
+
+func localExecPTY(ctx context.Context, cmd string, ch chan<- OutputLine) {
+	c := exec.Command("sh", "-c", cmd)
+
+	master, err := startWithPTY(c)
+	if err != nil {
+		ch <- OutputLine{Type: "error", Msg: "pty start failed: " + err.Error()}
+		return
+	}
+	defer master.Close()
+
+	doneCh := make(chan error, 1)
+	go func() {
+		doneCh <- c.Wait()
+	}()
+
+	outputCh := make(chan string, 100)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := master.Read(buf)
+			if n > 0 {
+				outputCh <- string(buf[:n])
+			}
+			if err != nil {
+				close(outputCh)
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case raw, ok := <-outputCh:
+			if !ok {
+				err := <-doneCh
+				exitCode := 0
+				if err != nil {
+					if exitErr, ok := err.(*exec.ExitError); ok {
+						exitCode = exitErr.ExitCode()
+					} else {
+						exitCode = 255
+					}
+				}
+				ch <- OutputLine{Type: "exit", Code: exitCode}
+				return
+			}
+			text := stripANSI(raw)
+			ch <- OutputLine{Type: "stdout", Raw: raw, Text: text}
 		case <-ctx.Done():
 			c.Process.Kill()
 			ch <- OutputLine{Type: "error", Msg: "command timeout"}
